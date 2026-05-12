@@ -166,9 +166,46 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource
 def get_supabase():
-    from supabase import create_client, Client
-    url  = st.secrets["SUPABASE_URL"]
-    key  = st.secrets["SUPABASE_KEY"]
+    from supabase import create_client
+
+    def _get(key: str) -> str:
+        """Try multiple secret layouts that users commonly have."""
+        # 1. Flat top-level  →  SUPABASE_URL = "..."
+        if key in st.secrets:
+            return st.secrets[key]
+        # 2. Under [supabase] section  →  url = "..."
+        section_key = key.replace("SUPABASE_", "").lower()
+        if "supabase" in st.secrets:
+            sec = st.secrets["supabase"]
+            if section_key in sec:
+                return sec[section_key]
+        # 3. Under [connections.supabase]  (Streamlit native connections)
+        try:
+            val = st.secrets["connections"]["supabase"][section_key]
+            if val:
+                return val
+        except (KeyError, TypeError):
+            pass
+        # Nothing found — show helpful diagnostics
+        available = list(st.secrets.keys())
+        nested = {k: list(st.secrets[k].keys())
+                  for k in available if isinstance(st.secrets.get(k), dict)}
+        st.error(
+            f"**Cannot find secret `{key}`.**\n\n"
+            f"Top-level keys visible: `{available}`\n\n"
+            f"Nested keys visible: `{nested}`\n\n"
+            "Your `secrets.toml` (or Streamlit Cloud Secrets) should look like:\n\n"
+            "```toml\n"
+            'SUPABASE_URL = "https://xxxx.supabase.co"\n'
+            'SUPABASE_KEY = "eyJ..."\n'
+            'APP_URL      = "https://your-app.streamlit.app"\n'
+            "```\n\n"
+            "Make sure there is **no `[section]` header** above these lines."
+        )
+        st.stop()
+
+    url = _get("SUPABASE_URL")
+    key = _get("SUPABASE_KEY")
     return create_client(url, key)
 
 BUCKET = "pdf-documents"
