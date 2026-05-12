@@ -279,10 +279,17 @@ def fetch_signatures(sb, doc_id: str):
     )
 
 
-def create_document(sb, title: str, file_name: str, storage_path: str) -> str:
+def create_document(sb, doc_id: str, title: str, file_name: str, storage_path: str) -> str:
+    """Insert a new document row using the caller-supplied UUID so storage and DB stay in sync."""
     res = (
         sb.table("documents")
-        .insert({"title": title, "file_name": file_name, "storage_path": storage_path, "status": "pending"})
+        .insert({
+            "id": doc_id,
+            "title": title,
+            "file_name": file_name,
+            "storage_path": storage_path,
+            "status": "pending",
+        })
         .execute()
     )
     return res.data[0]["id"]
@@ -624,7 +631,7 @@ def page_upload(sb):
             import uuid
             doc_id       = str(uuid.uuid4())
             storage_path = upload_pdf_to_storage(sb, doc_id, pdf_bytes, uploaded.name)
-            create_document(sb, title.strip(), uploaded.name, storage_path)
+            create_document(sb, doc_id, title.strip(), uploaded.name, storage_path)
 
             for idx, s in enumerate(valid_signers):
                 create_signer(sb, doc_id, s["name"].strip(), s["email"].strip(), s["role"].strip(), idx)
@@ -770,20 +777,11 @@ def page_sign(sb, doc_id: str, signer_id: str):
     st.markdown(f"""
     <div class="info-banner">
       You have been asked to sign <strong>{doc.get('title', 'this document')}</strong>.
-      Draw your signature below and confirm.
+      Complete all three steps below, then click <strong>Submit Signature</strong>.
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Steps ─────────────────────────────────────────────────────────────────
-    st.markdown("""
-    <div class="steps">
-      <div class="step active">1 · Review</div>
-      <div class="step active">2 · Draw Signature</div>
-      <div class="step active">3 · Place & Confirm</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── Load PDF for preview ─────────────────────────────────────────────────
+    # ── Load PDF ──────────────────────────────────────────────────────────────
     pdf_bytes = None
     try:
         pdf_bytes = download_pdf_from_storage(sb, doc.get("storage_path", ""))
@@ -798,59 +796,136 @@ def page_sign(sb, doc_id: str, signer_id: str):
         except Exception:
             pass
 
-    left_col, right_col = st.columns([5, 4])
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP A — Draw signature
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### Step 1 — Draw your signature")
+    st.caption("Use your mouse or touch screen to sign in the box below. Click the trash icon to clear and redraw.")
 
-    with right_col:
-        st.markdown("#### ✍️ Draw your signature")
-        try:
-            from streamlit_drawable_canvas import st_canvas
+    try:
+        from streamlit_drawable_canvas import st_canvas
+    except ImportError:
+        st.error("Missing: `pip install streamlit-drawable-canvas`")
+        return
+
+    pen_col, detail_col = st.columns([3, 2])
+    with pen_col:
+        ink_col1, ink_col2 = st.columns(2)
+        with ink_col1:
             stroke_color = st.color_picker("Ink colour", "#000000", key="sig_ink")
-            stroke_w     = st.slider("Stroke width", 1, 5, 3, key="sig_stroke")
+        with ink_col2:
+            stroke_w = st.slider("Stroke width", 1, 5, 3, key="sig_stroke")
 
-            st.markdown('<div class="canvas-wrap">', unsafe_allow_html=True)
-            canvas_result = st_canvas(
-                fill_color="rgba(255,255,255,0)",
-                stroke_width=stroke_w,
-                stroke_color=stroke_color,
-                background_color="#ffffff",
-                height=150,
-                width=400,
-                drawing_mode="freedraw",
-                key="sign_canvas",
-                display_toolbar=True,
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
-        except ImportError:
-            st.error("Missing: `pip install streamlit-drawable-canvas`")
-            return
+        st.markdown('<div class="canvas-wrap">', unsafe_allow_html=True)
+        canvas_result = st_canvas(
+            fill_color="rgba(255,255,255,0)",
+            stroke_width=stroke_w,
+            stroke_color=stroke_color,
+            background_color="#ffffff",
+            height=160,
+            width=520,
+            drawing_mode="freedraw",
+            key="sign_canvas",
+            display_toolbar=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        # Signer details
-        st.markdown("#### Your details")
+    with detail_col:
+        st.markdown("**Your details**")
         signer_name_input = st.text_input("Full name", value=signer["name"])
         signer_role_input = st.text_input("Title / Role", value=signer.get("role", ""))
         sign_date = st.date_input("Date", value=datetime.date.today())
 
-    with left_col:
-        st.markdown("#### 📄 Document preview & placement")
+    st.divider()
 
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP B — Choose where the signature appears
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### Step 2 — Choose where your signature appears")
+    st.caption("Select the page and position. The preview on the right updates instantly.")
+
+    place_col, preview_col = st.columns([2, 3])
+
+    with place_col:
         target_page = st.selectbox(
-            "Place signature on page",
+            "📄 Page",
             list(range(1, total_pages + 1)),
-            format_func=lambda x: f"Page {x}",
+            format_func=lambda x: f"Page {x}  {'(only page)' if total_pages == 1 else ''}",
         ) - 1
 
-        col_h, col_v = st.columns(2)
-        with col_h:
-            h_pos = st.selectbox("Horizontal", ["Left", "Centre", "Right"], index=2)
-        with col_v:
-            v_pos = st.selectbox("Vertical",   ["Top",  "Middle", "Bottom"], index=2)
+        st.markdown("**Horizontal position**")
+        h_pos = st.radio(
+            "Horizontal",
+            ["Left", "Centre", "Right"],
+            index=2,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
-        sig_scale = st.slider("Signature width (% of page)", 10, 50, 25)
+        st.markdown("**Vertical position**")
+        v_pos = st.radio(
+            "Vertical",
+            ["Top", "Middle", "Bottom"],
+            index=2,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
+        sig_scale = st.slider(
+            "Signature size (% of page width)",
+            min_value=10, max_value=50, value=25,
+            help="Drag to make your signature larger or smaller on the page.",
+        )
+
+        st.info(
+            f"📍 Your signature will appear at the **{v_pos.lower()}-{h_pos.lower()}** "
+            f"of page **{target_page + 1}**, at **{sig_scale}%** width."
+        )
+
+    with preview_col:
+        st.markdown("**Live preview**")
         if pdf_bytes:
-            preview = render_page_preview(pdf_bytes, target_page)
-            if preview:
-                st.image(preview, caption=f"Page {target_page + 1}", use_container_width=True)
+            preview_img = render_page_preview(pdf_bytes, target_page)
+            if preview_img:
+                from PIL import ImageDraw
+                prev_w, prev_h = preview_img.size
+                # Draw a placeholder box showing where sig will go
+                margin_px = int(prev_w * 0.02)
+                sig_w_px  = int(prev_w * sig_scale / 100)
+                sig_h_px  = int(sig_w_px * 0.35)  # estimated aspect ratio
+                label_px  = 18
+
+                if h_pos == "Left":
+                    bx = margin_px
+                elif h_pos == "Centre":
+                    bx = (prev_w - sig_w_px) // 2
+                else:
+                    bx = prev_w - sig_w_px - margin_px
+
+                if v_pos == "Top":
+                    by = margin_px
+                elif v_pos == "Middle":
+                    by = (prev_h - sig_h_px - label_px) // 2
+                else:
+                    by = prev_h - sig_h_px - label_px - margin_px
+
+                overlay = preview_img.convert("RGBA")
+                box_layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+                draw = ImageDraw.Draw(box_layer)
+                # Semi-transparent blue fill
+                draw.rectangle(
+                    [bx, by, bx + sig_w_px, by + sig_h_px + label_px],
+                    fill=(37, 99, 235, 55),
+                    outline=(37, 99, 235, 220),
+                    width=2,
+                )
+                draw.text((bx + 6, by + sig_h_px // 2 - 8), "✍  Your signature here", fill=(30, 64, 175, 230))
+                merged = Image.alpha_composite(overlay, box_layer)
+                st.image(merged.convert("RGB"), caption=f"Page {target_page + 1} — blue box shows signature placement", use_container_width=True)
+            else:
+                st.info("Install pymupdf for live previews: `pip install pymupdf`")
+        else:
+            st.info("PDF preview unavailable.")
 
     # ── Capture & submit ──────────────────────────────────────────────────────
     signature_ready = False
